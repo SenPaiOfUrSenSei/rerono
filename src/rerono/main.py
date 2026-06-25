@@ -602,9 +602,26 @@ def cmd_start(targets: list, duration_mins: int, port: int):
         print(f"  - {r}")
     print("\nRun 'rerono status' to check, or 'rerono stop' to stop blocking.")
     print("\n💡 Tips for Google/YouTube & Browsers:")
-    print("  1. Socket Reuse: If your browser was already open, it may reuse established connections.")
-    print("     Please close and restart your browser or open a new Private/Incognito window.")
-    print("  2. HTTP/3 (QUIC): Google sites use UDP-based HTTP/3, which bypasses TCP proxies.")
+    
+    # Check if user is on a window manager (like Hyprland, sway, i3, etc.) on Linux
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    is_wm = False
+    if os.name != 'nt' and desktop and not any(de in desktop for de in ["gnome", "kde", "xfce", "mate", "cinnamon"]):
+        is_wm = True
+        
+    if is_wm:
+        print(f"  ⚠️  Window Manager Detected ({os.environ.get('XDG_CURRENT_DESKTOP')}):")
+        print("     Browsers running under window managers often ignore system-wide desktop proxy settings.")
+        print("     Please configure your browser manually to route traffic through the proxy:")
+        print(f"     - Chrome/Edge/Brave: Close all instances and relaunch from your terminal with:")
+        print(f"       google-chrome-stable --proxy-server=\"http://127.0.0.1:{port}\"")
+        print(f"     - Firefox: Settings -> Network Settings -> Manual Proxy: Host 127.0.0.1, Port {port} (check 'Also use this proxy for HTTPS')")
+    else:
+        print("  1. Socket Reuse: If your browser was already open, it may reuse established connections.")
+        print("     Please close and restart your browser or open a new Private/Incognito window.")
+        
+    num = 3 if is_wm else 2
+    print(f"  {num}. HTTP/3 (QUIC): Google sites use UDP-based HTTP/3, which bypasses TCP proxies.")
     print("     If you can still access blocked pages, please disable QUIC in your browser:")
     print("     - Chrome/Edge: Go to chrome://flags, search 'Experimental QUIC protocol', set to 'Disabled', and relaunch.")
     print("     - Firefox: Go to about:config, search 'network.http.http3.enable', set to 'false'.")
