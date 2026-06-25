@@ -1,0 +1,22 @@
+# Rerono configuration file.
+# Predefined lists of URLs/domains to block.
+# You can reference these lists by name (e.g. 'rerono start social')
+# Or specify individual domains/URLs directly.
+
+default:
+  - youtube.com/shorts
+  - instagram.com/reels
+  - facebook.com/watch
+  - tiktok.com
+
+social:
+  - facebook.com
+  - instagram.com
+  - twitter.com
+  - x.com
+  - tiktok.com
+
+productivity:
+  - reddit.com
+  - youtube.com
+  - twitch.tv
