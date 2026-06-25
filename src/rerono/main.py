@@ -601,6 +601,13 @@ def cmd_start(targets: list, duration_mins: int, port: int):
     for r in sorted(resolved_rules):
         print(f"  - {r}")
     print("\nRun 'rerono status' to check, or 'rerono stop' to stop blocking.")
+    print("\n💡 Tips for Google/YouTube & Browsers:")
+    print("  1. Socket Reuse: If your browser was already open, it may reuse established connections.")
+    print("     Please close and restart your browser or open a new Private/Incognito window.")
+    print("  2. HTTP/3 (QUIC): Google sites use UDP-based HTTP/3, which bypasses TCP proxies.")
+    print("     If you can still access blocked pages, please disable QUIC in your browser:")
+    print("     - Chrome/Edge: Go to chrome://flags, search 'Experimental QUIC protocol', set to 'Disabled', and relaunch.")
+    print("     - Firefox: Go to about:config, search 'network.http.http3.enable', set to 'false'.")
 
 def cmd_stop():
     state_dir = get_state_dir()
