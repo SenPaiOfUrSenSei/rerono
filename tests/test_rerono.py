@@ -61,5 +61,70 @@ class TestRerono(unittest.TestCase):
         self.assertEqual(parsed["social"], ["facebook.com", "twitter.com"])
         self.assertEqual(parsed["inline"], ["single-value.com"])
 
+    def test_youtube_shorts_api_blocking(self):
+        from unittest.mock import MagicMock
+        import tempfile
+        import json
+        
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json') as tmp:
+            json.dump({
+                "rules": ["youtube.com/shorts"],
+                "start_time": 0,
+                "end_time": None
+            }, tmp)
+            tmp_path = tmp.name
+            
+        try:
+            from rerono.blocker_addon import ReronoBlocker
+            blocker = ReronoBlocker(tmp_path)
+            
+            # 1. Standard blocked page request
+            flow = MagicMock()
+            flow.request.pretty_url = "https://www.youtube.com/shorts"
+            flow.request.method = "GET"
+            flow.response = None
+            blocker.request(flow)
+            self.assertIsNotNone(flow.response)
+            self.assertEqual(flow.response.status_code, 403)
+            
+            # 2. Allowed video request
+            flow = MagicMock()
+            flow.request.pretty_url = "https://www.youtube.com/watch?v=123"
+            flow.request.method = "GET"
+            flow.response = None
+            blocker.request(flow)
+            self.assertIsNone(flow.response)
+            
+            # 3. Background reel API request
+            flow = MagicMock()
+            flow.request.pretty_url = "https://www.youtube.com/youtubei/v1/reel/item_watch"
+            flow.request.method = "POST"
+            flow.response = None
+            blocker.request(flow)
+            self.assertIsNotNone(flow.response)
+            self.assertEqual(flow.response.status_code, 403)
+            
+            # 4. Background browse API request with FEshorts payload
+            flow = MagicMock()
+            flow.request.pretty_url = "https://www.youtube.com/youtubei/v1/browse"
+            flow.request.method = "POST"
+            flow.request.get_text.return_value = '{"browseId": "FEshorts"}'
+            flow.response = None
+            blocker.request(flow)
+            self.assertIsNotNone(flow.response)
+            self.assertEqual(flow.response.status_code, 403)
+            
+            # 5. Background browse API request with other payload (allowed)
+            flow = MagicMock()
+            flow.request.pretty_url = "https://www.youtube.com/youtubei/v1/browse"
+            flow.request.method = "POST"
+            flow.request.get_text.return_value = '{"browseId": "FEwhat_to_watch"}'
+            flow.response = None
+            blocker.request(flow)
+            self.assertIsNone(flow.response)
+            
+        finally:
+            os.unlink(tmp_path)
+
 if __name__ == "__main__":
     unittest.main()

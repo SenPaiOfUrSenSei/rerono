@@ -44,7 +44,23 @@ class ReronoBlocker:
                 return  # Block expired, allow traffic
         
         url = flow.request.pretty_url
-        if should_block(url, self.loader.rules):
+        is_blocked = should_block(url, self.loader.rules)
+        
+        # Deep block YouTube Shorts AJAX/API requests if youtube.com/shorts is in the block list
+        if not is_blocked and "youtube.com" in url:
+            has_shorts_rule = any("youtube.com/shorts" in r.lower() or r.lower() == "youtube.com" for r in self.loader.rules)
+            if has_shorts_rule:
+                if "/youtubei/v1/reel" in url:
+                    is_blocked = True
+                elif "/youtubei/v1/browse" in url and flow.request.method == "POST":
+                    try:
+                        body = flow.request.get_text()
+                        if body and "FEshorts" in body:
+                            is_blocked = True
+                    except Exception:
+                        pass
+        
+        if is_blocked:
             # Block the request and return custom focus page
             html_content = generate_block_page(
                 url=url,
