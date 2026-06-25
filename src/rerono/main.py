@@ -105,7 +105,7 @@ def is_port_in_use(port: int) -> bool:
         except socket.error:
             return True
 
-def set_windows_proxy(enabled: bool, host="127.0.0.1", port=8080) -> bool:
+def set_windows_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
     try:
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
@@ -130,7 +130,18 @@ def set_windows_proxy(enabled: bool, host="127.0.0.1", port=8080) -> bool:
         print(f"Error setting Windows proxy: {e}")
         return False
 
-def set_linux_proxy(enabled: bool, host="127.0.0.1", port=8080) -> bool:
+def set_linux_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
+    # Update Wayland D-Bus & systemd user session environment (for Hyprland, Sway, i3, etc.)
+    try:
+        val = f"http://{host}:{port}" if enabled else ""
+        subprocess.run([
+            "dbus-update-activation-environment", "--systemd",
+            f"http_proxy={val}", f"https_proxy={val}",
+            f"HTTP_PROXY={val}", f"HTTPS_PROXY={val}"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     gnome_success = False
     try:
         # Check if gsettings is available
@@ -174,7 +185,7 @@ def set_linux_proxy(enabled: bool, host="127.0.0.1", port=8080) -> bool:
         return False
     return True
 
-def set_system_proxy(enabled: bool, host="127.0.0.1", port=8080) -> bool:
+def set_system_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
     if os.name == 'nt':
         return set_windows_proxy(enabled, host, port)
     else:
@@ -363,7 +374,7 @@ def run_controller():
     except Exception as e:
         sys.exit(f"Failed to read active rules: {e}")
         
-    port = state.get("port", 8080)
+    port = state.get("port", 58291)
     end_time = state.get("end_time")
     
     # Save controller PID
@@ -642,7 +653,7 @@ def cmd_stop():
         
     ctrl_pid = state.get("controller_pid", 0)
     mitm_pid = state.get("mitmdump_pid", 0)
-    port = state.get("port", 8080)
+    port = state.get("port", 58291)
     
     print("Stopping Rerono...")
     
@@ -693,7 +704,7 @@ def cmd_status():
         
     ctrl_pid = state.get("controller_pid", 0)
     mitm_pid = state.get("mitmdump_pid", 0)
-    port = state.get("port", 8080)
+    port = state.get("port", 58291)
     rules = state.get("rules", [])
     start_time = state.get("start_time", 0)
     end_time = state.get("end_time")
@@ -749,12 +760,12 @@ def cmd_clean():
     active_path = state_dir / "active_rules.json"
     
     # Load port if possible to turn off that specific proxy
-    port = 8080
+    port = 58291
     if active_path.exists():
         try:
             with open(active_path, "r", encoding="utf-8") as f:
                 state = json.load(f)
-            port = state.get("port", 8080)
+            port = state.get("port", 58291)
             ctrl_pid = state.get("controller_pid", 0)
             mitm_pid = state.get("mitmdump_pid", 0)
             if ctrl_pid > 0:
@@ -794,8 +805,8 @@ def main():
         help="Duration to block in minutes. If 0 or omitted, blocks indefinitely."
     )
     start_parser.add_argument(
-        "-p", "--port", type=int, default=8080,
-        help="Local proxy port (default: 8080)"
+        "-p", "--port", type=int, default=58291,
+        help="Local proxy port (default: 58291)"
     )
     
     # Stop command
