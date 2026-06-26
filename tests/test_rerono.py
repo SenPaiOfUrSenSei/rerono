@@ -30,6 +30,7 @@ class TestRerono(unittest.TestCase):
         # Exact domain and path match
         self.assertTrue(should_block("https://youtube.com/shorts", rules))
         self.assertTrue(should_block("https://www.youtube.com/shorts?v=123", rules))
+        self.assertTrue(should_block("https://www.youtube.com/shorts/hdhjsjh", rules))
         self.assertTrue(should_block("http://facebook.com/watch/something", rules))
         
         # Domain matches, but path does not
@@ -119,9 +120,22 @@ class TestRerono(unittest.TestCase):
             flow.request.pretty_url = "https://www.youtube.com/youtubei/v1/browse"
             flow.request.method = "POST"
             flow.request.get_text.return_value = '{"browseId": "FEwhat_to_watch"}'
+            flow.request.headers = {}
             flow.response = None
             blocker.request(flow)
             self.assertIsNone(flow.response)
+
+            # 6. Referer-based blocking for YouTube Shorts SPA navigation
+            flow = MagicMock()
+            flow.request.pretty_url = "https://www.youtube.com/youtubei/v1/player"
+            flow.request.method = "POST"
+            flow.request.headers = {"referer": "https://www.youtube.com/shorts/hdhjsjh", "accept": "application/json"}
+            flow.response = None
+            blocker.request(flow)
+            self.assertIsNotNone(flow.response)
+            self.assertEqual(flow.response.status_code, 403)
+            self.assertEqual(flow.response.headers["Content-Type"], "text/plain")
+            self.assertEqual(flow.response.content, b"Blocked by Rerono")
             
         finally:
             os.unlink(tmp_path)

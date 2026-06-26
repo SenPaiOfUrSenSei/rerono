@@ -46,6 +46,12 @@ class ReronoBlocker:
         url = flow.request.pretty_url
         is_blocked = should_block(url, self.loader.rules)
         
+        # Check referer header for client-side navigation (SPA) block support
+        if not is_blocked:
+            referer = flow.request.headers.get("referer", "")
+            if referer and should_block(referer, self.loader.rules):
+                is_blocked = True
+        
         # Deep block YouTube Shorts AJAX/API requests if youtube.com/shorts is in the block list
         if not is_blocked and "youtube.com" in url:
             has_shorts_rule = any("youtube.com/shorts" in r.lower() or r.lower() == "youtube.com" for r in self.loader.rules)
@@ -61,17 +67,29 @@ class ReronoBlocker:
                         pass
         
         if is_blocked:
-            # Block the request and return custom focus page
-            html_content = generate_block_page(
-                url=url,
-                end_time=self.loader.end_time,
-                start_time=self.loader.start_time
-            )
-            flow.response = http.Response.make(
-                403,
-                html_content.encode("utf-8"),
-                {"Content-Type": "text/html"}
-            )
+            # Check if this is an AJAX/fetch request or subresource
+            dest = flow.request.headers.get("sec-fetch-dest", "").lower()
+            accept = flow.request.headers.get("accept", "").lower()
+            is_ajax = dest in ["empty", "script", "style", "image", "font"] or "application/json" in accept or flow.request.headers.get("x-requested-with")
+            
+            if is_ajax:
+                flow.response = http.Response.make(
+                    403,
+                    b"Blocked by Rerono",
+                    {"Content-Type": "text/plain"}
+                )
+            else:
+                # Block the request and return custom focus page
+                html_content = generate_block_page(
+                    url=url,
+                    end_time=self.loader.end_time,
+                    start_time=self.loader.start_time
+                )
+                flow.response = http.Response.make(
+                    403,
+                    html_content.encode("utf-8"),
+                    {"Content-Type": "text/html"}
+                )
 
 def should_block(url: str, block_rules: list) -> bool:
     try:

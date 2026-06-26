@@ -32,18 +32,90 @@ productivity:
   - twitch.tv
 """
 
+def get_original_user_home() -> Path:
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except Exception:
+            pass
+    return Path.home()
+
+def chown_to_original_user(path: Path):
+    sudo_uid = os.environ.get("SUDO_UID")
+    sudo_gid = os.environ.get("SUDO_GID")
+    if sudo_uid and sudo_gid:
+        try:
+            os.chown(str(path), int(sudo_uid), int(sudo_gid))
+        except Exception:
+            pass
+
+def setup_transparent_proxy(port: int) -> bool:
+    import subprocess
+    print("Setting up transparent proxy redirection via iptables...")
+    try:
+        # 1. Redirect HTTP (port 80) except for root processes (to avoid loops)
+        subprocess.run([
+            "iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
+            "--dport", "80", "-m", "owner", "!", "--uid-owner", "root",
+            "-j", "REDIRECT", "--to-ports", str(port)
+        ], check=True)
+        
+        # 2. Redirect HTTPS (port 443) except for root processes
+        subprocess.run([
+            "iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
+            "--dport", "443", "-m", "owner", "!", "--uid-owner", "root",
+            "-j", "REDIRECT", "--to-ports", str(port)
+        ], check=True)
+        
+        # 3. Block UDP port 443 (QUIC) so browsers fall back to TCP/HTTPS
+        subprocess.run([
+            "iptables", "-A", "OUTPUT", "-p", "udp", "--dport", "443",
+            "-j", "REJECT"
+        ], check=True)
+        
+        print("Transparent proxy rules and QUIC block successfully configured.")
+        return True
+    except Exception as e:
+        print(f"Error configuring iptables: {e}")
+        return False
+
+def teardown_transparent_proxy(port: int):
+    import subprocess
+    print("Removing transparent proxy redirection rules...")
+    try:
+        subprocess.run([
+            "iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
+            "--dport", "80", "-m", "owner", "!", "--uid-owner", "root",
+            "-j", "REDIRECT", "--to-ports", str(port)
+        ], stderr=subprocess.DEVNULL)
+        subprocess.run([
+            "iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
+            "--dport", "443", "-m", "owner", "!", "--uid-owner", "root",
+            "-j", "REDIRECT", "--to-ports", str(port)
+        ], stderr=subprocess.DEVNULL)
+        subprocess.run([
+            "iptables", "-D", "OUTPUT", "-p", "udp", "--dport", "443",
+            "-j", "REJECT"
+        ], stderr=subprocess.DEVNULL)
+        print("Redirection rules successfully removed.")
+    except Exception as e:
+        print(f"Error clearing iptables: {e}")
+
 def get_config_dir() -> Path:
+    home = get_original_user_home()
     if os.name == 'nt':
-        return Path.home() / ".rerono"
+        return home / ".rerono"
     else:
         config_home = os.environ.get("XDG_CONFIG_HOME")
         if config_home:
             return Path(config_home) / "rerono"
         else:
-            return Path.home() / ".config" / "rerono"
+            return home / ".config" / "rerono"
 
 def get_state_dir() -> Path:
-    return Path.home() / ".rerono"
+    return get_original_user_home() / ".rerono"
 
 def ensure_config_exists() -> Path:
     config_dir = get_config_dir()
@@ -51,8 +123,10 @@ def ensure_config_exists() -> Path:
     if not config_file.exists():
         try:
             config_dir.mkdir(parents=True, exist_ok=True)
+            chown_to_original_user(config_dir)
             with open(config_file, "w", encoding="utf-8") as f:
                 f.write(DEFAULT_RULES_YAML)
+            chown_to_original_user(config_file)
             print(f"Created default configuration file at: {config_file}")
         except Exception as e:
             print(f"Warning: Could not create default config: {e}")
@@ -238,10 +312,13 @@ def trust_ca_windows(ca_path: Path) -> bool:
         return False
 
 def trust_ca_linux_nss(pem_path: Path) -> bool:
-    nss_db_dir = Path.home() / ".pki" / "nssdb"
+    home = get_original_user_home()
+    nss_db_dir = home / ".pki" / "nssdb"
     if not nss_db_dir.exists():
         try:
             nss_db_dir.mkdir(parents=True, exist_ok=True)
+            chown_to_original_user(nss_db_dir)
+            chown_to_original_user(home / ".pki")
         except Exception:
             pass
             
@@ -253,9 +330,14 @@ def trust_ca_linux_nss(pem_path: Path) -> bool:
         
     try:
         subprocess.run([
-            "certutil", "-d", f"sql:{Path.home()}/.pki/nssdb", 
+            "certutil", "-d", f"sql:{home}/.pki/nssdb", 
             "-A", "-t", "C,,", "-n", "Rerono mitmproxy CA", "-i", str(pem_path)
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # NSS database files are created, we should make sure the original user owns them
+        for f in ["cert9.db", "key4.db", "pkcs11.txt"]:
+            db_file = nss_db_dir / f
+            if db_file.exists():
+                chown_to_original_user(db_file)
         print("Successfully trusted Rerono CA in Chromium/NSS certificate store.")
         return True
     except Exception as e:
@@ -394,10 +476,15 @@ def run_controller():
         
     setup_signals(signal_handler)
     
-    # Enable system proxy
-    proxy_enabled = set_system_proxy(True, "127.0.0.1", port)
-    if not proxy_enabled:
-        log_error("Could not set system proxy. Running proxy server only.")
+    transparent = state.get("transparent", False)
+
+    # Enable system proxy (only if not in transparent mode)
+    if not transparent:
+        proxy_enabled = set_system_proxy(True, "127.0.0.1", port)
+        if not proxy_enabled:
+            log_error("Could not set system proxy. Running proxy server only.")
+    else:
+        print("Transparent proxy mode enabled. System proxy changes bypassed.")
         
     try:
         ca_path = ensure_ca_certificates()
@@ -409,15 +496,17 @@ def run_controller():
     addon_path = get_addon_path()
     cmd = [
         "uv", "tool", "run", "--from", "mitmproxy", "mitmdump",
-        "-q",
         "-s", addon_path,
         "-p", str(port)
     ]
-    
+    if transparent:
+        cmd += ["--mode", "transparent"]
+        
     env = os.environ.copy()
     env["RERONO_ACTIVE_RULES_PATH"] = str(active_path)
     
     log_path = state_dir / "rerono.log"
+    chown_to_original_user(log_path)
     
     try:
         with open(log_path, "a", encoding="utf-8") as log_file:
@@ -430,6 +519,7 @@ def run_controller():
                 preexec_fn=os.setpgrp if os.name != 'nt' else None,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
             )
+            chown_to_original_user(log_path)
             
         # Update mitmdump PID
         state["mitmdump_pid"] = mitm_proc.pid
@@ -453,9 +543,23 @@ def run_controller():
         cleanup_and_exit(state_dir, port, mitm_proc, 0)
 
 def cleanup_and_exit(state_dir: Path, port: int, mitm_proc, exit_code: int):
+    # Load transparent state if possible
+    active_path = state_dir / "active_rules.json"
+    transparent = False
+    if active_path.exists():
+        try:
+            with open(active_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            transparent = state.get("transparent", False)
+        except Exception:
+            pass
+
     # Disable system proxy
     set_system_proxy(False, "127.0.0.1", port)
     
+    if transparent:
+        teardown_transparent_proxy(port)
+        
     # Terminate mitmdump
     if mitm_proc:
         try:
@@ -468,7 +572,6 @@ def cleanup_and_exit(state_dir: Path, port: int, mitm_proc, exit_code: int):
                 pass
                 
     # Delete active rules
-    active_path = state_dir / "active_rules.json"
     if active_path.exists():
         try:
             active_path.unlink()
@@ -477,7 +580,13 @@ def cleanup_and_exit(state_dir: Path, port: int, mitm_proc, exit_code: int):
             
     sys.exit(exit_code)
 
-def cmd_start(targets: list, duration_mins: int, port: int):
+def cmd_start(targets: list, duration_mins: int, port: int, transparent: bool = False):
+    if transparent:
+        if os.name == 'nt':
+            sys.exit("Error: Transparent proxy mode is only supported on Linux.")
+        if os.geteuid() != 0:
+            sys.exit("Error: Transparent proxy mode requires root privileges. Please run via sudo:\n  sudo rerono start -t ...")
+
     state_dir = get_state_dir()
     active_path = state_dir / "active_rules.json"
     
@@ -538,7 +647,13 @@ def cmd_start(targets: list, duration_mins: int, port: int):
         return
         
     state_dir.mkdir(parents=True, exist_ok=True)
+    chown_to_original_user(state_dir)
     
+    # If transparent mode is requested, set up iptables redirect rules first
+    if transparent:
+        if not setup_transparent_proxy(port):
+            sys.exit("Error: Failed to set up transparent proxy redirection rules via iptables.")
+            
     # Prepare active rules JSON
     now = time.time()
     end_time = now + (duration_mins * 60) if duration_mins > 0 else None
@@ -548,12 +663,14 @@ def cmd_start(targets: list, duration_mins: int, port: int):
         "start_time": now,
         "end_time": end_time,
         "port": port,
+        "transparent": transparent,
         "controller_pid": 0,
         "mitmdump_pid": 0
     }
     
     with open(active_path, "w", encoding="utf-8") as f:
         json.dump(state_data, f, indent=2)
+    chown_to_original_user(active_path)
         
     # Generate and trust CA certificates
     try:
@@ -654,7 +771,12 @@ def cmd_stop():
     ctrl_pid = state.get("controller_pid", 0)
     mitm_pid = state.get("mitmdump_pid", 0)
     port = state.get("port", 58291)
+    transparent = state.get("transparent", False)
     
+    # If transparent mode was used, we require root to clean up iptables
+    if transparent and os.name != 'nt' and os.geteuid() != 0:
+        sys.exit("Error: Stopping Rerono in transparent mode requires root privileges. Please run via sudo:\n  sudo rerono stop")
+        
     print("Stopping Rerono...")
     
     # Graceful stop: kill controller first
@@ -677,14 +799,18 @@ def cmd_stop():
             kill_process(ctrl_pid)
         if mitm_pid > 0:
             kill_process(mitm_pid)
-        set_system_proxy(False, "127.0.0.1", port)
+        if not transparent:
+            set_system_proxy(False, "127.0.0.1", port)
+        else:
+            teardown_transparent_proxy(port)
+            
         if active_path.exists():
             try:
                 active_path.unlink()
             except Exception:
                 pass
                 
-    print("Rerono stopped successfully. System proxy settings restored.")
+    print("Rerono stopped successfully. System settings restored.")
 
 def cmd_status():
     state_dir = get_state_dir()
@@ -761,11 +887,13 @@ def cmd_clean():
     
     # Load port if possible to turn off that specific proxy
     port = 58291
+    transparent = False
     if active_path.exists():
         try:
             with open(active_path, "r", encoding="utf-8") as f:
                 state = json.load(f)
             port = state.get("port", 58291)
+            transparent = state.get("transparent", False)
             ctrl_pid = state.get("controller_pid", 0)
             mitm_pid = state.get("mitmdump_pid", 0)
             if ctrl_pid > 0:
@@ -776,8 +904,17 @@ def cmd_clean():
             pass
             
     # Force disable system proxy
-    set_system_proxy(False, "127.0.0.1", port)
+    if not transparent:
+        set_system_proxy(False, "127.0.0.1", port)
     
+    # Clear transparent proxy if applicable
+    if os.name != 'nt' and (transparent or os.geteuid() == 0):
+        if os.geteuid() == 0:
+            teardown_transparent_proxy(port)
+        else:
+            print("Note: Transparent proxy redirection rules could not be cleared because 'clean' was not run as root/sudo.")
+            print("Please run: sudo rerono clean")
+            
     # Delete active rules
     if active_path.exists():
         try:
@@ -785,7 +922,7 @@ def cmd_clean():
         except Exception:
             pass
             
-    print("System proxy settings restored. All Rerono state has been reset.")
+    print("System settings restored. All Rerono state has been reset.")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -807,6 +944,10 @@ def main():
     start_parser.add_argument(
         "-p", "--port", type=int, default=58291,
         help="Local proxy port (default: 58291)"
+    )
+    start_parser.add_argument(
+        "-t", "--transparent", action="store_true",
+        help="Enable transparent proxy NAT redirection (Linux only, requires sudo/root)"
     )
     
     # Stop command
@@ -838,7 +979,7 @@ def main():
         return
         
     if args.command == "start":
-        cmd_start(args.targets, args.duration, args.port)
+        cmd_start(args.targets, args.duration, args.port, args.transparent)
     elif args.command == "stop":
         cmd_stop()
     elif args.command == "status":
