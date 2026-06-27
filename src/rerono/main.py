@@ -502,6 +502,33 @@ def run_controller():
     if transparent:
         cmd += ["--mode", "transparent"]
         
+    # Build allow-hosts regex to only intercept configured block domains.
+    # All other domains are bypassed via SSL passthrough, preventing certificate errors.
+    rules = state.get("rules", [])
+    hosts = set()
+    for rule in rules:
+        rule = rule.strip().lower()
+        if not rule:
+            continue
+        if "/" in rule:
+            host_part = rule.split("/", 1)[0]
+        else:
+            host_part = rule
+        if ":" in host_part:
+            host_part = host_part.split(":", 1)[0]
+        if host_part:
+            hosts.add(host_part)
+            # YouTube's InnerTube API is located at youtubei.googleapis.com.
+            # If youtube.com is blocked (such as youtube.com/shorts), we must also decrypt youtubei.googleapis.com.
+            if host_part == "youtube.com":
+                hosts.add("youtubei.googleapis.com")
+            
+    if hosts:
+        import re
+        escaped_hosts = [re.escape(h) for h in hosts]
+        hosts_regex = f"^([a-zA-Z0-9-]+\\.)*({'|'.join(escaped_hosts)})(:[0-9]+)?$"
+        cmd += ["--allow-hosts", hosts_regex]
+        
     env = os.environ.copy()
     env["RERONO_ACTIVE_RULES_PATH"] = str(active_path)
     

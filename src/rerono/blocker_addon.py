@@ -53,7 +53,7 @@ class ReronoBlocker:
                 is_blocked = True
         
         # Deep block YouTube Shorts AJAX/API requests if youtube.com/shorts is in the block list
-        if not is_blocked and "youtube.com" in url:
+        if not is_blocked and ("youtube.com" in url or "youtubei.googleapis.com" in url):
             has_shorts_rule = any("youtube.com/shorts" in r.lower() or r.lower() == "youtube.com" for r in self.loader.rules)
             if has_shorts_rule:
                 if "/youtubei/v1/reel" in url:

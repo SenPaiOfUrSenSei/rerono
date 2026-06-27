@@ -125,9 +125,9 @@ class TestRerono(unittest.TestCase):
             blocker.request(flow)
             self.assertIsNone(flow.response)
 
-            # 6. Referer-based blocking for YouTube Shorts SPA navigation
+            # 6. Referer-based blocking for YouTube Shorts SPA navigation (on youtubei.googleapis.com)
             flow = MagicMock()
-            flow.request.pretty_url = "https://www.youtube.com/youtubei/v1/player"
+            flow.request.pretty_url = "https://youtubei.googleapis.com/youtubei/v1/player"
             flow.request.method = "POST"
             flow.request.headers = {"referer": "https://www.youtube.com/shorts/hdhjsjh", "accept": "application/json"}
             flow.response = None
@@ -136,6 +136,16 @@ class TestRerono(unittest.TestCase):
             self.assertEqual(flow.response.status_code, 403)
             self.assertEqual(flow.response.headers["Content-Type"], "text/plain")
             self.assertEqual(flow.response.content, b"Blocked by Rerono")
+            
+            # 7. Reel API endpoint on youtubei.googleapis.com direct blocking
+            flow = MagicMock()
+            flow.request.pretty_url = "https://youtubei.googleapis.com/youtubei/v1/reel/reel_item_watch"
+            flow.request.method = "POST"
+            flow.request.headers = {}
+            flow.response = None
+            blocker.request(flow)
+            self.assertIsNotNone(flow.response)
+            self.assertEqual(flow.response.status_code, 403)
             
         finally:
             os.unlink(tmp_path)
