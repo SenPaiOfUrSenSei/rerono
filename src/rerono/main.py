@@ -344,6 +344,60 @@ def trust_ca_linux_nss(pem_path: Path) -> bool:
         print(f"Note: Failed to add CA to NSS store automatically: {e}")
         return False
 
+def trust_ca_linux_firefox(pem_path: Path) -> bool:
+    home = get_original_user_home()
+    firefox_dir = home / ".mozilla" / "firefox"
+    if not firefox_dir.exists():
+        return False
+        
+    try:
+        subprocess.run(["certutil", "-h"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return False
+        
+    success = False
+    try:
+        # Find all cert9.db files recursively in the firefox directory
+        for p in firefox_dir.glob("**/cert9.db"):
+            profile_dir = p.parent
+            try:
+                subprocess.run([
+                    "certutil", "-d", f"sql:{profile_dir}", 
+                    "-A", "-t", "C,,", "-n", "Rerono mitmproxy CA", "-i", str(pem_path)
+                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Make sure the files are owned by the original user
+                for f in ["cert9.db", "key4.db", "pkcs11.txt"]:
+                    db_file = profile_dir / f
+                    if db_file.exists():
+                        chown_to_original_user(db_file)
+                success = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if success:
+        print("Successfully trusted Rerono CA in Firefox certificate stores.")
+    return success
+
+def check_git_config_warning():
+    try:
+        res = subprocess.run(
+            ["git", "config", "--global", "http.sslcainfo"],
+            capture_output=True, text=True
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            val = res.stdout.strip()
+            if "mitmproxy" in val.lower() or "rerono" in val.lower():
+                print("\n⚠️  [Warning] Detected custom Git SSL configuration pointing to mitmproxy:")
+                print(f"     http.sslcainfo = {val}")
+                print("     Because Rerono now bypasses SSL decryption for unblocked sites (like GitHub),")
+                print("     this will cause Git connection errors on unblocked repositories.")
+                print("     We highly recommend unsetting this option so Git uses system-wide CA trust:")
+                print("       git config --global --unset http.sslcainfo\n")
+    except Exception:
+        pass
+
 def print_linux_ca_instructions(pem_path: Path):
     print("\n[HTTPS Certificate Instruction]")
     print("To block HTTPS pages (like youtube.com/shorts) without security warnings,")
@@ -706,10 +760,13 @@ def cmd_start(targets: list, duration_mins: int, port: int, transparent: bool = 
             trust_ca_windows(ca_path)
         else:
             nss_success = trust_ca_linux_nss(ca_path)
+            trust_ca_linux_firefox(ca_path)
             if not nss_success:
                 print_linux_ca_instructions(ca_path)
     except Exception as e:
         print(f"Warning: Failed to trust CA certificates: {e}")
+        
+    check_git_config_warning()
         
     # Launch controller
     controller_cmd = [sys.executable, os.path.abspath(__file__), "--controller-worker"]

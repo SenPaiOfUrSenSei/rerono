@@ -150,5 +150,77 @@ class TestRerono(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
+    def test_check_git_config_warning(self):
+        from unittest.mock import patch, MagicMock
+        from rerono.main import check_git_config_warning
+        
+        # Test case 1: Git warning is triggered
+        mock_res = MagicMock()
+        mock_res.returncode = 0
+        mock_res.stdout = "/home/user/.mitmproxy/mitmproxy-ca-cert.pem\n"
+        
+        with patch('subprocess.run', return_value=mock_res) as mock_run, \
+             patch('builtins.print') as mock_print:
+            check_git_config_warning()
+            mock_run.assert_called_once_with(
+                ["git", "config", "--global", "http.sslcainfo"],
+                capture_output=True, text=True
+            )
+            # Verify print was called containing warning text
+            mock_print.assert_any_call("\n⚠️  [Warning] Detected custom Git SSL configuration pointing to mitmproxy:")
+
+        # Test case 2: No warning if output does not contain mitmproxy or rerono
+        mock_res2 = MagicMock()
+        mock_res2.returncode = 0
+        mock_res2.stdout = "/some/other/path/cert.pem\n"
+        with patch('subprocess.run', return_value=mock_res2), \
+             patch('builtins.print') as mock_print:
+            check_git_config_warning()
+            mock_print.assert_not_called()
+
+    def test_trust_ca_linux_firefox(self):
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path
+        import subprocess
+        from rerono.main import trust_ca_linux_firefox
+        
+        # Test case 1: Firefox directory does not exist
+        with patch('rerono.main.get_original_user_home', return_value=Path('/nonexistent_home')), \
+             patch('pathlib.Path.exists', return_value=False):
+            res = trust_ca_linux_firefox(Path('/path/to/pem'))
+            self.assertFalse(res)
+            
+        # Test case 2: Firefox directory exists, certutil not found
+        with patch('rerono.main.get_original_user_home', return_value=Path('/home/user')), \
+             patch('pathlib.Path.exists', return_value=True), \
+             patch('subprocess.run', side_effect=FileNotFoundError):
+            res = trust_ca_linux_firefox(Path('/path/to/pem'))
+            self.assertFalse(res)
+            
+        # Test case 3: Success finding profiles and running certutil
+        mock_cert9 = MagicMock()
+        mock_cert9.parent = Path('/home/user/.mozilla/firefox/profile1')
+        
+        # Note: glob finds mock_cert9 when searching for **/cert9.db
+        # We need Path.exists to return True for cert9.db, key4.db, pkcs11.txt when chowning
+        original_exists = Path.exists
+        def mock_exists(self_path):
+            if "/home/user" in str(self_path):
+                return True
+            return original_exists(self_path)
+
+        with patch('rerono.main.get_original_user_home', return_value=Path('/home/user')), \
+             patch('pathlib.Path.exists', new=mock_exists), \
+             patch('pathlib.Path.glob', return_value=[mock_cert9]), \
+             patch('subprocess.run') as mock_run, \
+             patch('rerono.main.chown_to_original_user') as mock_chown:
+            res = trust_ca_linux_firefox(Path('/path/to/pem'))
+            self.assertTrue(res)
+            mock_run.assert_any_call(
+                ["certutil", "-h"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            # chown is called for the 3 database files
+            self.assertEqual(mock_chown.call_count, 3)
+
 if __name__ == "__main__":
     unittest.main()
