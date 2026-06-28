@@ -91,6 +91,15 @@ class ReronoBlocker:
                     {"Content-Type": "text/html"}
                 )
 
+DEVELOPER_BYPASS_DOMAINS = {
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "antigravity.google",
+    "antigravity-unleash.goog",
+    "google-antigravity.com",
+}
+
 def should_block(url: str, block_rules: list) -> bool:
     try:
         parsed = urlparse(url)
@@ -101,6 +110,11 @@ def should_block(url: str, block_rules: list) -> bool:
         if ":" in host:
             host = host.split(":")[0]
             
+        # Check if the host matches any domain in the developer bypass list (including subdomains)
+        for bypass_dom in DEVELOPER_BYPASS_DOMAINS:
+            if host == bypass_dom or host.endswith("." + bypass_dom):
+                return False
+                
         for rule in block_rules:
             rule = rule.lower().strip()
             if not rule:

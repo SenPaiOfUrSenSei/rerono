@@ -222,5 +222,75 @@ class TestRerono(unittest.TestCase):
             # chown is called for the 3 database files
             self.assertEqual(mock_chown.call_count, 3)
 
+    def test_find_uv_path(self):
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path
+        from rerono.main import find_uv_path
+        
+        # Test case 1: uv is found in system PATH
+        with patch('shutil.which', return_value='/usr/bin/uv'):
+            self.assertEqual(find_uv_path(), '/usr/bin/uv')
+            
+        # Test case 2: uv is not in system PATH but in user home (.local/bin/uv)
+        with patch('shutil.which', return_value=None), \
+             patch('rerono.main.get_original_user_home', return_value=Path('/home/user')), \
+             patch('pathlib.Path.exists', return_value=True), \
+             patch('os.access', return_value=True):
+            self.assertEqual(find_uv_path(), '/home/user/.local/bin/uv')
+            
+        # Test case 3: fallback to 'uv' if not found anywhere
+        with patch('shutil.which', return_value=None), \
+             patch('rerono.main.get_original_user_home', return_value=Path('/home/user')), \
+             patch('pathlib.Path.exists', return_value=False):
+            self.assertEqual(find_uv_path(), 'uv')
+
+    def test_is_pid_alive(self):
+        from unittest.mock import patch
+        import errno
+        from rerono.main import is_pid_alive
+        
+        # Test case 1: Windows platform (invalid handle)
+        with patch('os.name', 'nt'):
+            self.assertFalse(is_pid_alive(-1))
+            
+        # Test case 2: POSIX and process is alive (kill succeeds)
+        with patch('os.name', 'posix'), \
+             patch('os.kill', return_value=None):
+            self.assertTrue(is_pid_alive(12345))
+            
+        # Test case 3: POSIX and process exists but owned by root (raises EPERM)
+        mock_eperm = OSError()
+        mock_eperm.errno = errno.EPERM
+        with patch('os.name', 'posix'), \
+             patch('os.kill', side_effect=mock_eperm):
+            self.assertTrue(is_pid_alive(12345))
+            
+        # Test case 4: POSIX and process is dead (raises ESRCH)
+        mock_esrch = OSError()
+        mock_esrch.errno = errno.ESRCH
+        with patch('os.name', 'posix'), \
+             patch('os.kill', side_effect=mock_esrch):
+            self.assertFalse(is_pid_alive(12345))
+
+    def test_developer_bypass_domains(self):
+        rules = ["github.com", "gitlab.com", "bitbucket.org", "antigravity.google", "antigravity-unleash.goog", "google-antigravity.com", "youtube.com"]
+        
+        # Bypass domains should NOT be blocked, even if in rules
+        self.assertFalse(should_block("https://github.com", rules))
+        self.assertFalse(should_block("http://github.com/path", rules))
+        self.assertFalse(should_block("https://api.github.com/repos", rules))
+        self.assertFalse(should_block("https://gitlab.com", rules))
+        self.assertFalse(should_block("https://sub.gitlab.com/repo", rules))
+        self.assertFalse(should_block("https://bitbucket.org", rules))
+        self.assertFalse(should_block("https://antigravity.google", rules))
+        self.assertFalse(should_block("https://agent.antigravity.google/v1", rules))
+        self.assertFalse(should_block("https://antigravity-unleash.goog", rules))
+        self.assertFalse(should_block("https://sub.antigravity-unleash.goog/api", rules))
+        self.assertFalse(should_block("https://google-antigravity.com", rules))
+        
+        # Other domains in rules SHOULD be blocked
+        self.assertTrue(should_block("https://youtube.com", rules))
+        self.assertTrue(should_block("https://www.youtube.com/shorts", rules))
+
 if __name__ == "__main__":
     unittest.main()

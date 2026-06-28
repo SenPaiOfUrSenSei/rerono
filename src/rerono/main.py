@@ -32,6 +32,23 @@ productivity:
   - twitch.tv
 """
 
+DEVELOPER_BYPASS_DOMAINS = {
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "antigravity.google",
+    "antigravity-unleash.goog",
+    "google-antigravity.com",
+}
+
+def is_developer_bypass_domain(host: str) -> bool:
+    host = host.lower().strip()
+    for d in DEVELOPER_BYPASS_DOMAINS:
+        if host == d or host.endswith("." + d):
+            return True
+    return False
+
+
 def get_original_user_home() -> Path:
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
@@ -51,54 +68,143 @@ def chown_to_original_user(path: Path):
         except Exception:
             pass
 
+def find_uv_path() -> str:
+    import shutil
+    uv_path = shutil.which("uv")
+    if uv_path:
+        return uv_path
+        
+    home = get_original_user_home()
+    possible_paths = [
+        home / ".local" / "bin" / "uv",
+        home / ".cargo" / "bin" / "uv",
+        Path("/usr/local/bin/uv"),
+        Path("/usr/bin/uv")
+    ]
+    for p in possible_paths:
+        if p.exists() and os.access(p, os.X_OK):
+            return str(p)
+            
+    return "uv"
+
 def setup_transparent_proxy(port: int) -> bool:
     import subprocess
-    print("Setting up transparent proxy redirection via iptables...")
-    try:
-        # 1. Redirect HTTP (port 80) except for root processes (to avoid loops)
-        subprocess.run([
-            "iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
-            "--dport", "80", "-m", "owner", "!", "--uid-owner", "root",
-            "-j", "REDIRECT", "--to-ports", str(port)
-        ], check=True)
-        
-        # 2. Redirect HTTPS (port 443) except for root processes
-        subprocess.run([
-            "iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
-            "--dport", "443", "-m", "owner", "!", "--uid-owner", "root",
-            "-j", "REDIRECT", "--to-ports", str(port)
-        ], check=True)
-        
-        # 3. Block UDP port 443 (QUIC) so browsers fall back to TCP/HTTPS
-        subprocess.run([
-            "iptables", "-A", "OUTPUT", "-p", "udp", "--dport", "443",
-            "-j", "REJECT"
-        ], check=True)
-        
-        print("Transparent proxy rules and QUIC block successfully configured.")
+    print("Setting up transparent proxy redirection via iptables and ip6tables...")
+    
+    def check_and_add_rule(tool: str, args: list) -> bool:
+        check_args = [tool]
+        for arg in args:
+            if arg == "-A":
+                check_args.append("-C")
+            else:
+                check_args.append(arg)
+        try:
+            res = subprocess.run(check_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+            
+        try:
+            subprocess.run([tool] + args, check=True)
+            return True
+        except Exception as e:
+            if tool == "ip6tables":
+                print(f"Warning: Failed to add ip6tables rule {args}: {e}")
+                return True
+            print(f"Error configuring iptables rule {args}: {e}")
+            return False
+
+    # IPv4 Redirects
+    r1 = check_and_add_rule("iptables", [
+        "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
+        "--dport", "80", "-m", "owner", "!", "--uid-owner", "root",
+        "-j", "REDIRECT", "--to-ports", str(port)
+    ])
+    
+    r2 = check_and_add_rule("iptables", [
+        "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
+        "--dport", "443", "-m", "owner", "!", "--uid-owner", "root",
+        "-j", "REDIRECT", "--to-ports", str(port)
+    ])
+    
+    r3 = check_and_add_rule("iptables", [
+        "-A", "OUTPUT", "-p", "udp", "--dport", "443",
+        "-j", "REJECT"
+    ])
+    
+    # IPv6 Redirects
+    r4 = check_and_add_rule("ip6tables", [
+        "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
+        "--dport", "80", "-m", "owner", "!", "--uid-owner", "root",
+        "-j", "REDIRECT", "--to-ports", str(port)
+    ])
+    
+    r5 = check_and_add_rule("ip6tables", [
+        "-t", "nat", "-A", "OUTPUT", "-p", "tcp",
+        "--dport", "443", "-m", "owner", "!", "--uid-owner", "root",
+        "-j", "REDIRECT", "--to-ports", str(port)
+    ])
+    
+    r6 = check_and_add_rule("ip6tables", [
+        "-A", "OUTPUT", "-p", "udp", "--dport", "443",
+        "-j", "REJECT"
+    ])
+    
+    if r1 and r2 and r3 and r4 and r5 and r6:
+        print("Transparent proxy rules and QUIC block successfully configured (IPv4 & IPv6).")
         return True
-    except Exception as e:
-        print(f"Error configuring iptables: {e}")
-        return False
+    return False
 
 def teardown_transparent_proxy(port: int):
     import subprocess
-    print("Removing transparent proxy redirection rules...")
+    print("Removing transparent proxy redirection rules (IPv4 & IPv6)...")
     try:
-        subprocess.run([
-            "iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
+        def delete_rule_all_occurrences(tool: str, args: list):
+            while True:
+                try:
+                    res = subprocess.run([tool] + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if res.returncode != 0:
+                        break
+                except Exception:
+                    break
+
+        # IPv4 Cleanup
+        delete_rule_all_occurrences("iptables", [
+            "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
             "--dport", "80", "-m", "owner", "!", "--uid-owner", "root",
             "-j", "REDIRECT", "--to-ports", str(port)
-        ], stderr=subprocess.DEVNULL)
-        subprocess.run([
-            "iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
+        ])
+        
+        delete_rule_all_occurrences("iptables", [
+            "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
             "--dport", "443", "-m", "owner", "!", "--uid-owner", "root",
             "-j", "REDIRECT", "--to-ports", str(port)
-        ], stderr=subprocess.DEVNULL)
-        subprocess.run([
-            "iptables", "-D", "OUTPUT", "-p", "udp", "--dport", "443",
+        ])
+        
+        delete_rule_all_occurrences("iptables", [
+            "-D", "OUTPUT", "-p", "udp", "--dport", "443",
             "-j", "REJECT"
-        ], stderr=subprocess.DEVNULL)
+        ])
+        
+        # IPv6 Cleanup
+        delete_rule_all_occurrences("ip6tables", [
+            "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
+            "--dport", "80", "-m", "owner", "!", "--uid-owner", "root",
+            "-j", "REDIRECT", "--to-ports", str(port)
+        ])
+        
+        delete_rule_all_occurrences("ip6tables", [
+            "-t", "nat", "-D", "OUTPUT", "-p", "tcp",
+            "--dport", "443", "-m", "owner", "!", "--uid-owner", "root",
+            "-j", "REDIRECT", "--to-ports", str(port)
+        ])
+        
+        delete_rule_all_occurrences("ip6tables", [
+            "-D", "OUTPUT", "-p", "udp", "--dport", "443",
+            "-j", "REJECT"
+        ])
+        
         print("Redirection rules successfully removed.")
     except Exception as e:
         print(f"Error clearing iptables: {e}")
@@ -173,10 +279,12 @@ def load_yaml_config(path: Path) -> dict:
 def is_port_in_use(port: int) -> bool:
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return False
-        except socket.error:
+        except socket.error as e:
+            print(f"[Debug] Port check bind failed for 127.0.0.1:{port}: {e}")
             return True
 
 def set_windows_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
@@ -188,8 +296,14 @@ def set_windows_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
             if enabled:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
+                bypass_list = "localhost;127.0.0.1;*.github.com;github.com;*.gitlab.com;gitlab.com;*.bitbucket.org;bitbucket.org;*.antigravity.google;antigravity.google;<local>"
+                winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, bypass_list)
             else:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                try:
+                    winreg.DeleteValue(key, "ProxyOverride")
+                except FileNotFoundError:
+                    pass
         finally:
             winreg.CloseKey(key)
 
@@ -208,10 +322,12 @@ def set_linux_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
     # Update Wayland D-Bus & systemd user session environment (for Hyprland, Sway, i3, etc.)
     try:
         val = f"http://{host}:{port}" if enabled else ""
+        no_proxy_val = "localhost,127.0.0.1,0.0.0.0,::1,github.com,.github.com,gitlab.com,.gitlab.com,bitbucket.org,.bitbucket.org,antigravity.google,.antigravity.google" if enabled else ""
         subprocess.run([
             "dbus-update-activation-environment", "--systemd",
             f"http_proxy={val}", f"https_proxy={val}",
-            f"HTTP_PROXY={val}", f"HTTPS_PROXY={val}"
+            f"HTTP_PROXY={val}", f"HTTPS_PROXY={val}",
+            f"no_proxy={no_proxy_val}", f"NO_PROXY={no_proxy_val}"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
@@ -228,6 +344,13 @@ def set_linux_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
             subprocess.run(["gsettings", "set", "org.gnome.system.proxy.http", "port", str(port)], check=True)
             subprocess.run(["gsettings", "set", "org.gnome.system.proxy.https", "host", host], check=True)
             subprocess.run(["gsettings", "set", "org.gnome.system.proxy.https", "port", str(port)], check=True)
+            
+            # Set ignore-hosts to bypass developer domains
+            ignore_hosts = "['localhost', '127.0.0.0/8', '::1', '*.github.com', 'github.com', '*.gitlab.com', 'gitlab.com', '*.bitbucket.org', 'bitbucket.org', '*.antigravity.google', 'antigravity.google']"
+            subprocess.run(["gsettings", "set", "org.gnome.system.proxy", "ignore-hosts", ignore_hosts], check=True)
+        else:
+            # Restore default ignore-hosts
+            subprocess.run(["gsettings", "set", "org.gnome.system.proxy", "ignore-hosts", "['localhost', '127.0.0.0/8', '::1']"], check=True)
         gnome_success = True
     except Exception:
         pass
@@ -241,6 +364,9 @@ def set_linux_proxy(enabled: bool, host="127.0.0.1", port=58291) -> bool:
             if enabled:
                 subprocess.run([kwriteconfig, "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpProxy", f"http://{host}:{port}"], check=True)
                 subprocess.run([kwriteconfig, "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpsProxy", f"http://{host}:{port}"], check=True)
+                subprocess.run([kwriteconfig, "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "NoProxyFor", "localhost,127.0.0.1,github.com,gitlab.com,bitbucket.org,antigravity.google"], check=True)
+            else:
+                subprocess.run([kwriteconfig, "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "NoProxyFor", ""], check=True)
             subprocess.run(["dbus-send", "--type=signal", "/KIO/Scheduler", "org.kde.KIO.Scheduler.reparseConfiguration"], check=True)
             kde_success = True
             break
@@ -279,7 +405,7 @@ def ensure_ca_certificates() -> Path:
         print("Mitmproxy CA certificate not found. Starting mitmdump briefly to generate it...")
         # We start mitmdump on a high port so that it initializes proxying and generates CA certs
         proc = subprocess.Popen(
-            ["uv", "tool", "run", "--from", "mitmproxy", "mitmdump", "-p", "61023"],
+            [find_uv_path(), "tool", "run", "--from", "mitmproxy", "mitmdump", "-p", "61023"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL
@@ -438,11 +564,12 @@ def is_pid_alive(pid: int) -> bool:
             except Exception:
                 return False
     else:
+        import errno
         try:
             os.kill(pid, 0)
             return True
-        except OSError:
-            return False
+        except OSError as e:
+            return e.errno == errno.EPERM
 
 def kill_process(pid: int):
     if pid <= 0:
@@ -549,9 +676,10 @@ def run_controller():
     # Start mitmdump
     addon_path = get_addon_path()
     cmd = [
-        "uv", "tool", "run", "--from", "mitmproxy", "mitmdump",
+        find_uv_path(), "tool", "run", "--from", "mitmproxy", "mitmdump",
         "-s", addon_path,
-        "-p", str(port)
+        "-p", str(port),
+        "--set", "block_global=false"
     ]
     if transparent:
         cmd += ["--mode", "transparent"]
@@ -577,14 +705,29 @@ def run_controller():
             if host_part == "youtube.com":
                 hosts.add("youtubei.googleapis.com")
             
+    # Filter out developer bypass domains from allow-hosts
+    filtered_hosts = set()
+    for host in hosts:
+        should_bypass = False
+        for bypass_dom in DEVELOPER_BYPASS_DOMAINS:
+            if host == bypass_dom or host.endswith("." + bypass_dom):
+                should_bypass = True
+                break
+        if not should_bypass:
+            filtered_hosts.add(host)
+    hosts = filtered_hosts
+            
     if hosts:
         import re
         escaped_hosts = [re.escape(h) for h in hosts]
         hosts_regex = f"^([a-zA-Z0-9-]+\\.)*({'|'.join(escaped_hosts)})(:[0-9]+)?$"
         cmd += ["--allow-hosts", hosts_regex]
+    else:
+        cmd += ["--allow-hosts", "^$"]
         
     env = os.environ.copy()
     env["RERONO_ACTIVE_RULES_PATH"] = str(active_path)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     
     log_path = state_dir / "rerono.log"
     chown_to_original_user(log_path)
@@ -718,6 +861,21 @@ def cmd_start(targets: list, duration_mins: int, port: int, transparent: bool = 
             else:
                 resolved_rules.add(normalize_target(t))
                 
+    # Filter out developer bypass domains from active block rules
+    final_rules = set()
+    for rule in resolved_rules:
+        host_part = rule.split("/", 1)[0] if "/" in rule else rule
+        if ":" in host_part:
+            host_part = host_part.split(":", 1)[0]
+        should_bypass = False
+        for bypass_dom in DEVELOPER_BYPASS_DOMAINS:
+            if host_part == bypass_dom or host_part.endswith("." + bypass_dom):
+                should_bypass = True
+                break
+        if not should_bypass:
+            final_rules.add(rule)
+    resolved_rules = final_rules
+
     if not resolved_rules:
         print("Error: Resolved rules list is empty. Nothing to block.")
         return
@@ -770,6 +928,8 @@ def cmd_start(targets: list, duration_mins: int, port: int, transparent: bool = 
         
     # Launch controller
     controller_cmd = [sys.executable, os.path.abspath(__file__), "--controller-worker"]
+    controller_env = os.environ.copy()
+    controller_env["PYTHONDONTWRITEBYTECODE"] = "1"
     
     if os.name == 'nt':
         subprocess.Popen(
@@ -777,7 +937,8 @@ def cmd_start(targets: list, duration_mins: int, port: int, transparent: bool = 
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            env=controller_env
         )
     else:
         subprocess.Popen(
@@ -785,7 +946,8 @@ def cmd_start(targets: list, duration_mins: int, port: int, transparent: bool = 
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            preexec_fn=os.setpgrp
+            preexec_fn=os.setpgrp,
+            env=controller_env
         )
         
     # Wait briefly for controller to write its PID
